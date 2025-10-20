@@ -11,8 +11,13 @@ import io.kubernetes.client.util.Config;
 
 import com.kaiburr.taskapi.util.CommandValidator;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
 import java.util.*;
 
 @Service
@@ -42,44 +47,41 @@ public class TaskService {
         repo.deleteById(id);
     }
 
-    public Task executeTaskInPod(String id) throws Exception {
-        Task task = repo.findById(id).orElseThrow();
-        TaskExecution exec = new TaskExecution();
-        exec.setStartTime(new Date());
+    public Task executeTaskLocally(String id) {
+        Task task = repo.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Task not found with ID: " + id));
 
-        ApiClient client = Config.defaultClient();
-        Configuration.setDefaultApiClient(client);
-        CoreV1Api api = new CoreV1Api();
-
-        String podName = "task-" + UUID.randomUUID().toString().substring(0, 5);
-        String namespace = "default";
-
-        V1Pod pod = new V1Pod()
-                .metadata(new V1ObjectMeta().name(podName))
-                .spec(new V1PodSpec()
-                        .restartPolicy("Never")
-                        .containers(List.of(new V1Container()
-                                .name("busybox")
-                                .image("busybox")
-                                .command(List.of("sh", "-c", task.getCommand()))
-                        ))
-                );
-
-        api.createNamespacedPod(namespace, pod);
-
-        while (true) {
-            V1Pod current = api.readNamespacedPod(podName, namespace).execute();
-            String phase = current.getStatus().getPhase();
-            if ("Succeeded".equals(phase) || "Failed".equals(phase)) break;
-            Thread.sleep(1000);
+        try {
+            CommandValidator.validate(task.getCommand());
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid command: " + e.getMessage());
         }
 
-        String logs = String.valueOf(api.readNamespacedPodLog(podName, namespace));
-        api.deleteNamespacedPod(podName, namespace);
+        TaskExecution execution = new TaskExecution();
+        execution.setStartTime(new Date());
 
-        exec.setEndTime(new Date());
-        exec.setOutput(logs);
-        task.getTaskExecutions().add(exec);
+        try {
+            ProcessBuilder builder = new ProcessBuilder("cmd.exe", "/c", task.getCommand());
+            builder.redirectErrorStream(true);
+            Process process = builder.start();
+
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            StringBuilder output = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append("\n");
+            }
+
+            int exitCode = process.waitFor();
+            execution.setEndTime(new Date());
+            execution.setOutput("Exit Code: " + exitCode + "\n" + output.toString());
+
+        } catch (IOException | InterruptedException e) {
+            execution.setEndTime(new Date());
+            execution.setOutput("Error: " + e.getMessage());
+        }
+
+        task.getTaskExecutions().add(execution);
         return repo.save(task);
     }
 }

@@ -42,7 +42,8 @@ public class TaskController {
     }
 
     @PutMapping("/{id}/execute")
-    public Task execute(@PathVariable String id) throws Exception {
-        return service.executeTaskInPod(id);
+    public ResponseEntity<Task> execute(@PathVariable String id) {
+        Task executedTask = service.executeTaskLocally(id);
+        return ResponseEntity.ok(executedTask);
     }
 }
